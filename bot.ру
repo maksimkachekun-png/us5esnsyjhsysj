@@ -10,11 +10,11 @@ from datetime import datetime
 from maxapi import MaxAPI  # Библиотека для работы с MAX
 
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BOTFATHER"
-CHANNEL_ID = "@tvoy_kanal"
-CHANNEL_LINK = "https://t.me/tvoy_kanal"
-GROUP_ID = -1001234567890  # Обязательно отрицательное число
-ADMIN_ID = 123456789
+BOT_TOKEN = "8672850414:AAF0efnhvfTu8KNV953kPFQQm3FodWxDqfo"
+CHANNEL_ID = "-1003575639896"
+CHANNEL_LINK = "https://t.me/rentmaxwork"
+GROUP_ID = -1003924087794  # Обязательно отрицательное число
+ADMIN_ID = 8016986918
 
 # ==================== ХРАНИЛИЩЕ ====================
 class Data:
