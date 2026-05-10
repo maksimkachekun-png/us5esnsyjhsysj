@@ -8,6 +8,92 @@ import uuid
 import random
 from datetime import datetime
 from maxapi import MaxAPI  # Библиотека для работы с MAX
+import subprocess
+import sys
+import os
+
+# ==================== АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ ====================
+def install_dependencies():
+    """Устанавливает все необходимые пакеты"""
+    
+    # Сначала установим git если его нет
+    try:
+        subprocess.check_call(["git", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except:
+        print("⚠️ Git не найден, пробуем альтернативную установку...")
+        # Качаем ZIP архива с GitHub напрямую
+        install_maxapi_from_zip()
+        return
+    
+    # Установка MaxAPI
+    try:
+        from maxapi import MaxAPI
+        print("✅ MaxAPI уже установлен")
+    except ImportError:
+        print("📦 Устанавливаю MaxAPI из GitHub...")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", 
+            "git+https://github.com/Sharkow1743/MaxAPI.git"
+        ])
+        from maxapi import MaxAPI
+        print("✅ MaxAPI установлен!")
+
+def install_maxapi_from_zip():
+    """Установка MaxAPI из ZIP архива"""
+    import urllib.request
+    import zipfile
+    import tempfile
+    
+    try:
+        from maxapi import MaxAPI
+        print("✅ MaxAPI уже установлен")
+        return
+    except ImportError:
+        pass
+    
+    print("📦 Скачиваю MaxAPI как ZIP...")
+    
+    # Скачиваем архив
+    url = "https://github.com/Sharkow1743/MaxAPI/archive/refs/heads/main.zip"
+    tmp_dir = tempfile.mkdtemp()
+    zip_path = os.path.join(tmp_dir, "maxapi.zip")
+    
+    try:
+        urllib.request.urlretrieve(url, zip_path)
+        
+        # Распаковываем
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(tmp_dir)
+        
+        # Находим папку с пакетом
+        extracted_dir = os.path.join(tmp_dir, "MaxAPI-main")
+        
+        # Копируем папку maxapi в site-packages
+        import site
+        site_packages = site.getsitepackages()[0]
+        maxapi_dir = os.path.join(extracted_dir, "maxapi")
+        
+        if os.path.exists(maxapi_dir):
+            import shutil
+            target_dir = os.path.join(site_packages, "maxapi")
+            if os.path.exists(target_dir):
+                shutil.rmtree(target_dir)
+            shutil.copytree(maxapi_dir, target_dir)
+            print("✅ MaxAPI установлен из ZIP!")
+        else:
+            print("❌ Не удалось найти папку maxapi в архиве")
+            
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+# Установка при запуске
+install_dependencies()
+
+# Теперь можно импортировать
+from maxapi import MaxAPI
+
+# ... остальной код бота
 
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = "8672850414:AAF0efnhvfTu8KNV953kPFQQm3FodWxDqfo"
